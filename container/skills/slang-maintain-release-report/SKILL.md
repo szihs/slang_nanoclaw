@@ -1,6 +1,6 @@
 ---
 name: slang-maintain-release-report
-description: Daily reports, release notes, SPIRV updates, GitLab rebase. Use when preparing releases or generating reports. Keywords: daily report, release, SPIRV, GitLab, MCP, changelog, nv-master.
+description: "Daily reports, release notes, SPIRV updates, GitLab rebase. Use when preparing releases or generating reports. Keywords: daily report, release, SPIRV, GitLab, MCP, changelog, nv-master."
 argument-hint: "[task: daily-report|release-notes|update-spirv|update-gitlab|full-release] [time-range: 5m|24h|48h|7d|30d] [output: file|terminal|both]"
 allowed-tools:
   - Bash

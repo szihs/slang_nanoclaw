@@ -1,6 +1,6 @@
 ---
 name: slang-build
-description: Clone, configure, build, and test the Slang compiler. Trigger when the repo needs initial setup, a rebuild, or when build/test commands fail. Not for code changes (use /slang-fix). Keywords: clone, build, cmake, ninja, test, setup, configure, compile.
+description: "Clone, configure, build, and test the Slang compiler. Trigger when the repo needs initial setup, a rebuild, or when build/test commands fail. Not for code changes (use /slang-fix). Keywords: clone, build, cmake, ninja, test, setup, configure, compile."
 allowed-tools: Bash(git:*), Bash(cmake:*), Bash(ninja:*), Bash(ctest:*), Bash(make:*)
 ---
 
