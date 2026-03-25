@@ -1,0 +1,168 @@
+{
+  "slang-build": {
+    "description": "Build system, CI/CD, development environment",
+    "template": "container/skills/slang-templates/templates/slang-setup.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "CMakeLists.txt",
+      "CMakePresets.json",
+      "cmake/",
+      ".github/workflows/"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-frontend": {
+    "description": "Lexer, parser, preprocessing, semantic analysis",
+    "template": "container/skills/slang-templates/templates/slang-frontend.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-parser*.cpp",
+      "source/slang/slang-lexer*.cpp",
+      "source/slang/slang-check-*.cpp",
+      "source/slang/slang-ast-*.h"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-ir": {
+    "description": "IR generation, optimization passes, lowering",
+    "template": "container/skills/slang-templates/templates/slang-ir.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-ir*.h",
+      "source/slang/slang-ir*.cpp",
+      "source/slang/slang-lower-to-ir.cpp"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-backend": {
+    "description": "All code generation backends (HLSL, GLSL, SPIR-V, Metal, CUDA, C++)",
+    "template": "container/skills/slang-templates/templates/slang-backend.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-emit-*.cpp"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-type-system": {
+    "description": "Type system, parameter binding, layout computation",
+    "template": "container/skills/slang-templates/templates/slang-type-system.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-type-layout.cpp",
+      "source/slang/slang-parameter-binding.cpp"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-capabilities": {
+    "description": "Capability detection, cross-platform validation",
+    "template": "container/skills/slang-templates/templates/slang-capabilities.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-capability.*"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-language": {
+    "description": "Generics, interfaces, autodiff, modules — end-to-end features",
+    "template": "container/skills/slang-templates/templates/slang-language.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "source/slang/slang-check-generics.cpp",
+      "source/slang/slang-ir-specialize.cpp",
+      "source/slang/slang-ir-autodiff*.cpp"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-testing": {
+    "description": "Test framework, regression testing, coverage analysis",
+    "template": "container/skills/slang-templates/templates/slang-testing.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "tests/",
+      "tools/slang-test/"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-api": {
+    "description": "C API, session management, reflection API",
+    "template": "container/skills/slang-templates/templates/slang-api.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "slang.h",
+      "source/slang/slang.cpp",
+      "source/slang/slang-reflection.cpp"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-doc": {
+    "description": "User guide, API docs, stdlib documentation",
+    "template": "container/skills/slang-templates/templates/slang-doc.md",
+    "base": "slang-build",
+    "focusFiles": [
+      "docs/",
+      "prelude/",
+      "source/slang/*.meta.slang"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  }
+}
