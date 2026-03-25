@@ -1,6 +1,6 @@
 ---
 name: slang-github
-description: Interact with GitHub for shader-slang/slang. Trigger when given an issue number, PR number, or when a completed fix needs a PR. Fetches issues/PRs, reviews diffs, creates PRs. Keywords: issue, PR, review, github, fetch, create PR, gh.
+description: "Interact with GitHub for shader-slang/slang. Trigger when given an issue number, PR number, or when a completed fix needs a PR. Fetches issues/PRs, reviews diffs, creates PRs. Keywords: issue, PR, review, github, fetch, create PR, gh."
 allowed-tools: Bash(git:*), Bash(gh:*), Read, Grep, Glob
 argument-hint: "[issue or PR number, e.g. 10650 or #10650]"
 ---

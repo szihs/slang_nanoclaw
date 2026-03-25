@@ -1,6 +1,6 @@
 ---
 name: slang-fix
-description: Implement a code change, bug fix, or new test in the Slang compiler. Trigger after investigation is complete and you know what to change. Requires /slang-build (repo built) and /slang-explore (code understood). Keywords: fix, implement, edit, patch, branch, commit, test, write code.
+description: "Implement a code change, bug fix, or new test in the Slang compiler. Trigger after investigation is complete and you know what to change. Requires /slang-build (repo built) and /slang-explore (code understood). Keywords: fix, implement, edit, patch, branch, commit, test, write code."
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 argument-hint: "[brief description of what to fix]"
 ---
