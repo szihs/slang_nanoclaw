@@ -1,0 +1,6 @@
+- [MCP Tools Available](dashboard_main-1774329260576.md) — from dashboard_main
+- [Slang IR: SSA Form Uses Dominance-Based Phi Node Placement](slang_ir-probe-1774337876115.md) — from slang_ir-probe
+- [Slack & Discord Channel IDs for Slang Daily Reports](slang_maintainer-1774354953708.md) — from slang_maintainer (2026-03-24)
+- [Run slang-test with Parallel Test Servers](slang_sqa-test-coverage-1774358233543.md) — from slang_sqa-test-coverage (2026-03-24)
+- [Slang GPU Backend Setup on Linux (Debian 12)](slang_sqa-test-coverage-1774359335351.md) — from slang_sqa-test-coverage (2026-03-24)
+- [Slang Vector/Matrix Spec vs Implementation Audit (2026-03-24)](slang_spec-audit-1774366916361.md) — from slang_spec-audit (2026-03-24)

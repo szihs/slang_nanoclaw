@@ -27,6 +27,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  allowedMcpTools?: string[];
 }
 
 interface ContainerOutput {
@@ -324,6 +325,110 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 /**
+/**
+ * Full tool inventories for each MCP server.
+ * Used to build disallowedTools lists (SDK's allowedTools doesn't restrict
+ * bypassPermissions, and MCP servers expose all tools as a bundle).
+ *
+ * IMPORTANT: When adding a new MCP tool to any server, update ALL THREE places:
+ *   1. HERE — MCP_TOOL_INVENTORIES (blocklist source; missing = silently allowed to all agents)
+ *   2. groups/coworker-types.json — allowedMcpTools per type that should have access
+ *   3. .claude/skills/onboard-coworker/SKILL.md — Phase 1.5 tool catalog (documentation)
+ * Then rebuild container (./container/build.sh) and restart service.
+ */
+const MCP_TOOL_INVENTORIES: Record<string, string[]> = {
+  deepwiki: [
+    'mcp__deepwiki__read_wiki_structure',
+    'mcp__deepwiki__read_wiki_contents',
+    'mcp__deepwiki__ask_question',
+  ],
+  'slang-mcp': [
+    'mcp__slang-mcp__github_get_issue',
+    'mcp__slang-mcp__github_list_issues',
+    'mcp__slang-mcp__github_search_issues',
+    'mcp__slang-mcp__github_list_pull_requests',
+    'mcp__slang-mcp__github_get_pull_request',
+    'mcp__slang-mcp__github_get_pull_request_comments',
+    'mcp__slang-mcp__github_get_pull_request_reviews',
+    'mcp__slang-mcp__github_create_or_update_file',
+    'mcp__slang-mcp__github_get_discussions',
+    'mcp__slang-mcp__gitlab_list_issues',
+    'mcp__slang-mcp__gitlab_list_merge_requests',
+    'mcp__slang-mcp__gitlab_get_file_contents',
+    'mcp__slang-mcp__gitlab_create_or_update_file',
+    'mcp__slang-mcp__discord_read_messages',
+    'mcp__slang-mcp__slack_post_message',
+    'mcp__slang-mcp__slack_get_channel_history',
+    'mcp__slang-mcp__slack_reply_to_thread',
+    'mcp__slang-mcp__slack_get_user_profile',
+    'mcp__slang-mcp__slack_search_messages',
+  ],
+};
+
+/**
+ * Build disallowedTools list: for each connected MCP server, block tools
+ * that are NOT in the allowed list. This enforces per-coworker tool restrictions
+ * because SDK's allowedTools doesn't gate bypassPermissions mode.
+ */
+function buildDisallowedTools(allowedMcpTools: string[]): string[] {
+  const allowed = new Set(allowedMcpTools);
+  const blocked: string[] = [];
+
+  for (const [, tools] of Object.entries(MCP_TOOL_INVENTORIES)) {
+    for (const tool of tools) {
+      if (!allowed.has(tool)) {
+        blocked.push(tool);
+      }
+    }
+  }
+
+  return blocked;
+}
+
+/**
+ * Build MCP server config based on allowed tools.
+ * Only connects servers whose tools are in the allowed list.
+ * nanoclaw IPC server is always connected.
+ */
+function buildMcpServers(
+  containerInput: ContainerInput,
+  mcpServerPath: string,
+): Record<string, any> {
+  const allowed = containerInput.allowedMcpTools || [];
+
+  const servers: Record<string, any> = {
+    // IPC server — always connected
+    nanoclaw: {
+      command: 'node',
+      args: [mcpServerPath],
+      env: {
+        NANOCLAW_CHAT_JID: containerInput.chatJid,
+        NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+        NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      },
+    },
+  };
+
+  // Connect deepwiki if any deepwiki tool is allowed
+  if (allowed.some(t => t.startsWith('mcp__deepwiki__'))) {
+    servers['deepwiki'] = {
+      type: 'http' as const,
+      url: 'https://mcp.deepwiki.com/mcp',
+    };
+  }
+
+  // Connect slang-mcp if any slang-mcp tool is allowed AND proxy URL is set
+  if (process.env.MCP_PROXY_URL && allowed.some(t => t.startsWith('mcp__slang-mcp__'))) {
+    servers['slang-mcp'] = {
+      type: 'http' as const,
+      url: process.env.MCP_PROXY_URL,
+    };
+  }
+
+  return servers;
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -389,6 +494,11 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  const mcpAllowed = containerInput.allowedMcpTools || [];
+  const mcpDisallowed = buildDisallowedTools(mcpAllowed);
+  log(`MCP allowed: ${JSON.stringify(mcpAllowed)}`);
+  log(`MCP disallowed (${mcpDisallowed.length}): ${JSON.stringify(mcpDisallowed)}`);
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -407,23 +517,18 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        ...mcpAllowed,
       ],
+      disallowedTools: mcpDisallowed,
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
-        },
-      },
+      mcpServers: buildMcpServers(containerInput, mcpServerPath),
+      // Dashboard hook events are delivered via native HTTP hooks in settings.json
+      // (configured by container-runner.ts). Only PreCompact needs an SDK callback
+      // for transcript archival.
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
       },

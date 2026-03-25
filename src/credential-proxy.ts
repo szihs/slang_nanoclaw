@@ -62,6 +62,13 @@ export function startCredentialProxy(
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
 
+        // Strip anthropic-beta headers only when using a non-Anthropic upstream
+        // proxy (e.g. NVIDIA) that may reject unrecognised beta flags.
+        // The standard api.anthropic.com endpoint handles them fine.
+        if (upstreamUrl.hostname !== 'api.anthropic.com') {
+          delete headers['anthropic-beta'];
+        }
+
         if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];

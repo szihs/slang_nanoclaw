@@ -47,12 +47,49 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
+### Shared Learnings
+
+**At session start**, read `/workspace/global/learnings/INDEX.md` for a summary of discoveries shared by other coworkers. Read individual files only when relevant to your current task.
+
+**When you discover something important** (a gotcha, an undocumented behavior, a key insight about the codebase), share it immediately so other coworkers benefit:
+
+```bash
+cat > /workspace/ipc/tasks/learn_$(date +%s).json << 'EOF'
+{
+  "type": "append_learning",
+  "content": "# Discovery Title\n\nWhat you learned and why it matters."
+}
+EOF
+```
+
+This writes to the shared learnings directory on the host. Other coworkers will see it on their next session.
+
+Learnings paths:
+- **Read from**: `/workspace/global/learnings/` (non-main) or `/workspace/project/groups/global/learnings/` (main)
+- **Write via**: IPC `append_learning` task (as shown above)
+
 ## Message Formatting
 
-NEVER use markdown. Only use WhatsApp/Telegram formatting:
-- *single asterisks* for bold (NEVER **double asterisks**)
-- _underscores_ for italic
-- • bullet points
-- ```triple backticks``` for code
+Adapt formatting to your channel:
+- **Dashboard / web UI**: Markdown is fine (headings, links, bold, code blocks)
+- **WhatsApp / Telegram**: Use *single asterisks* for bold, _underscores_ for italic, • bullet points, ```triple backticks``` for code. No ## headings or [links](url).
 
-No ## headings. No [links](url). No **double stars**.
+When unsure which channel you're on, prefer plain text with minimal formatting.
+
+
+
+---
+
+
+---
+
+## Slang Compiler Project
+
+Use the `/slang-build` skill for cloning, building, and navigating the Slang compiler.
+- If the repo isn't already at `/workspace/group/slang`, clone it: `git clone https://github.com/shader-slang/slang.git /workspace/group/slang`
+- Read the repo's CLAUDE.md before any code tasks — it has build/test/debug instructions
+- See `/home/node/.claude/skills/slang-build/` for detailed build, structure, and gotchas guides
+- Install missing packages with `sudo apt-get install -y <package>` if needed
+- Use `mcp__deepwiki__*` tools to look up documentation for `shader-slang/slang`
+
+Write key learnings to `/workspace/group/memory/` and share via `append_learning` IPC.

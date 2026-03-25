@@ -301,12 +301,24 @@ server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
+Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.
+
+For Slang coworkers, pass coworkerType (e.g., "slang-ir", "slang-frontend") — the host will automatically:
+- Append the domain-specific CLAUDE.md template
+- Create a git worktree from the Slang repo
+- Configure additionalMounts so the coworker can access the repo
+
+For coworkers without a pre-existing template, use claudeMdAppend to pass custom instructions that get appended to the coworker's CLAUDE.md. This lets you define the coworker's role and focus without needing a template file on disk.`,
   {
-    jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
+    jid: z.string().describe('The chat JID (e.g., "dashboard:slang-ir", "tg:-1001234567890", "dc:1234567890123456")'),
     name: z.string().describe('Display name for the group'),
-    folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
-    trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    folder: z.string().describe('Channel-prefixed folder name (e.g., "slang_ir-generics", "telegram_dev-team")'),
+    trigger: z.string().describe('Trigger word (e.g., "@Andy", "@SlangIR")'),
+    requiresTrigger: z.boolean().optional().describe('Whether trigger prefix is needed (default: true). Set false for coworkers.'),
+    coworkerType: z.string().optional().describe('Coworker type for auto-setup (e.g., "slang-ir", "slang-frontend"). Appends domain template to CLAUDE.md, creates git worktree, and configures mounts.'),
+    claudeMdAppend: z.string().optional().describe('Custom markdown to append to the coworker\'s CLAUDE.md. Use this to define the coworker\'s role, which skills to focus on, and how to approach tasks. The host writes this to the file — no write access needed from the container.'),
+    allowedMcpTools: z.array(z.string()).optional().describe('Exact MCP tool names this coworker can use (e.g., ["mcp__deepwiki__ask_question", "mcp__slang-mcp__github_get_issue"]). mcp__nanoclaw__* is always included. Typed coworkers inherit defaults from coworker-types.json. Custom coworkers default to none if omitted.'),
+    containerConfig: z.string().optional().describe('JSON string of container config (e.g., {"additionalMounts":[{"hostPath":"/path","containerPath":"name","readonly":false}]}). Not needed if coworkerType is set — mounts are auto-configured.'),
   },
   async (args) => {
     if (!isMain) {
@@ -316,19 +328,39 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const data = {
+    let containerConfig;
+    if (args.containerConfig) {
+      try {
+        containerConfig = JSON.parse(args.containerConfig);
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: `Invalid containerConfig JSON: ${args.containerConfig}` }],
+          isError: true,
+        };
+      }
+    }
+
+    const data: Record<string, any> = {
       type: 'register_group',
       jid: args.jid,
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      requiresTrigger: args.requiresTrigger ?? true,
       timestamp: new Date().toISOString(),
     };
+    if (containerConfig) data.containerConfig = containerConfig;
+    if (args.coworkerType) data.coworkerType = args.coworkerType;
+    if (args.claudeMdAppend) data.claudeMdAppend = args.claudeMdAppend;
+    if (args.allowedMcpTools) data.allowedMcpTools = args.allowedMcpTools;
 
     writeIpcFile(TASKS_DIR, data);
 
+    const extras = args.coworkerType
+      ? ` Host will auto-setup: domain template (${args.coworkerType}), git worktree, and repo mount.`
+      : '';
     return {
-      content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+      content: [{ type: 'text' as const, text: `Group "${args.name}" registered.${extras} It will start receiving messages immediately.` }],
     };
   },
 );

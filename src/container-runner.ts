@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  MCP_PROXY_PORT,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -21,11 +22,13 @@ import { logger } from './logger.js';
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
+  gpuArgs,
   hostGatewayArgs,
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -41,6 +44,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  allowedMcpTools?: string[];
 }
 
 export interface ContainerOutput {
@@ -123,38 +127,204 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
-    );
+  const dashboardPort = process.env.DASHBOARD_PORT || '3737';
+  const dashboardUrl = `http://${CONTAINER_HOST_GATEWAY}:${dashboardPort}`;
+  const managedEnv: Record<string, string> = {
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    NANOCLAW_GROUP_FOLDER: group.folder,
+    DASHBOARD_URL: dashboardUrl,
+  };
+
+  // Read existing settings to preserve user-added keys
+  let existing: Record<string, any> = {};
+  try {
+    existing = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+  } catch {
+    /* file missing or invalid — start fresh */
   }
 
+  // Merge env: NanoClaw-managed keys override, user keys preserved
+  const mergedEnv = { ...(existing.env || {}), ...managedEnv };
+
+  // Merge hooks: use native HTTP hooks to POST events directly to the dashboard.
+  // Claude Code sends the full event JSON as the POST body. The group folder is
+  // passed via X-Group-Folder header (interpolated from env var at hook runtime).
+  let mergedHooks = existing.hooks || {};
+  const hookEvents = [
+    // Tool lifecycle
+    'PreToolUse',
+    'PostToolUse',
+    'PostToolUseFailure',
+    // Session lifecycle
+    'SessionStart',
+    'SessionEnd',
+    'Stop',
+    // Notifications & prompts
+    'Notification',
+    'UserPromptSubmit',
+    'PermissionRequest',
+    // Subagent lifecycle
+    'SubagentStart',
+    'SubagentStop',
+    // Agent Teams
+    'TaskCompleted',
+    'TeammateIdle',
+    // Compaction
+    'PreCompact',
+    'PostCompact',
+    // Instructions
+    'InstructionsLoaded',
+  ];
+  const nanoclawHookUrl = `${dashboardUrl}/api/hook-event`;
+  for (const event of hookEvents) {
+    const existingList: { hooks?: any[]; command?: string }[] =
+      mergedHooks[event] || [];
+    // Remove stale NanoClaw hooks (both old command-style and HTTP hook groups)
+    const userHooks = existingList.filter((h) => {
+      // Old command-style hooks
+      if (h.command && h.command.includes('notify-dashboard.sh')) return false;
+      // HTTP hook groups: check inside the hooks array
+      if (
+        h.hooks &&
+        h.hooks.some(
+          (inner: any) =>
+            inner.type === 'http' &&
+            inner.url &&
+            inner.url.includes('/api/hook-event'),
+        )
+      )
+        return false;
+      return true;
+    });
+    mergedHooks[event] = [
+      {
+        hooks: [
+          {
+            type: 'http',
+            // Use 127.0.0.1 (not host.docker.internal) because Claude Code
+            // blocks HTTP hooks to private IPs. A socat proxy inside the
+            // container forwards 127.0.0.1:DASHBOARD_PORT → host gateway.
+            url: `http://127.0.0.1:${dashboardPort}/api/hook-event`,
+            headers: { 'X-Group-Folder': '$NANOCLAW_GROUP_FOLDER' },
+            allowedEnvVars: ['NANOCLAW_GROUP_FOLDER'],
+            timeout: 5,
+          },
+        ],
+      },
+      ...userHooks,
+    ];
+  }
+
+  const settings: Record<string, unknown> = {
+    ...existing,
+    env: mergedEnv,
+    hooks: mergedHooks,
+  };
+  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+
   // Sync skills from container/skills/ into each group's .claude/skills/
+  // Clean stale dirs first (e.g., after skill renames) then copy fresh
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+    const srcDirs = new Set(
+      fs
+        .readdirSync(skillsSrc)
+        .filter((d) => fs.statSync(path.join(skillsSrc, d)).isDirectory()),
+    );
+    if (fs.existsSync(skillsDst)) {
+      for (const existing of fs.readdirSync(skillsDst)) {
+        if (!srcDirs.has(existing)) {
+          fs.rmSync(path.join(skillsDst, existing), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+    }
+    for (const skillDir of srcDirs) {
+      fs.cpSync(
+        path.join(skillsSrc, skillDir),
+        path.join(skillsDst, skillDir),
+        { recursive: true },
+      );
+    }
+  }
+
+  // Re-compose CLAUDE.md from layers at every startup (keeps templates fresh).
+  // Layer 0: global/CLAUDE.md (base persona)
+  // Layer 1: coworker-slang-base.md (clone/build/share) — if coworkerType set
+  // Layer 2: domain template(s) from coworker-types.json — if coworkerType set
+  if (!isMain && group.coworkerType) {
+    const projectRoot = process.cwd();
+    const claudeMd = path.join(groupDir, 'CLAUDE.md');
+    try {
+      // Layer 0: global base
+      let composed = fs.readFileSync(
+        path.join(GROUPS_DIR, 'global', 'CLAUDE.md'),
+        'utf-8',
+      );
+
+      // Layer 1: slang-build block
+      try {
+        composed += `\n---\n\n${fs.readFileSync(
+          path.join(
+            projectRoot,
+            '.claude',
+            'skills',
+            'add-slang',
+            'patches',
+            'coworker-slang-base.md',
+          ),
+          'utf-8',
+        )}`;
+      } catch {
+        /* patch not installed */
+      }
+
+      // Layer 2: domain template(s)
+      try {
+        const types = JSON.parse(
+          fs.readFileSync(
+            path.join(GROUPS_DIR, 'coworker-types.json'),
+            'utf-8',
+          ),
+        );
+        const entry = types[group.coworkerType];
+        const templates = Array.isArray(entry?.template)
+          ? entry.template
+          : entry?.template
+            ? [entry.template]
+            : [];
+        for (const tpl of templates) {
+          try {
+            composed += `\n---\n\n${fs.readFileSync(path.resolve(projectRoot, tpl), 'utf-8')}`;
+          } catch {
+            /* template missing */
+          }
+        }
+
+        // Append focusFiles as a priority section so the agent knows where to look first
+        const focusFiles: string[] | undefined = entry?.focusFiles;
+        if (focusFiles && focusFiles.length > 0) {
+          composed += `\n\n## Priority Files\n\nFocus your work on these paths first:\n`;
+          for (const f of focusFiles) {
+            composed += `- \`${f}\`\n`;
+          }
+        }
+      } catch {
+        /* coworker-types.json missing or invalid */
+      }
+
+      fs.writeFileSync(claudeMd, composed);
+      logger.debug(
+        { folder: group.folder, coworkerType: group.coworkerType },
+        'Re-composed CLAUDE.md from layers',
+      );
+    } catch {
+      /* global CLAUDE.md missing — skip re-compose */
     }
   }
   mounts.push({
@@ -175,9 +345,9 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
+  // Sync agent-runner source into a per-group writable location.
+  // Copied fresh on every startup to pick up code changes (e.g. MCP tool enforcement).
+  // Recompiled on container startup via entrypoint.sh.
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
@@ -190,7 +360,7 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  if (fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
@@ -215,11 +385,21 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  groupFolder: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const dashboardPort = process.env.DASHBOARD_PORT || '3737';
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `NANOCLAW_GROUP_FOLDER=${groupFolder}`);
+  args.push(
+    '-e',
+    `DASHBOARD_URL=http://${CONTAINER_HOST_GATEWAY}:${dashboardPort}`,
+  );
+  // socat proxy needs these to forward 127.0.0.1:PORT → host gateway:PORT
+  args.push('-e', `NANOCLAW_DASHBOARD_PORT=${dashboardPort}`);
+  args.push('-e', `NANOCLAW_HOST_GATEWAY=${CONTAINER_HOST_GATEWAY}`);
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -238,8 +418,39 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass GitHub token for gh CLI access inside containers (if configured)
+  const ghToken = process.env.GH_TOKEN;
+  if (ghToken) {
+    args.push('-e', `GH_TOKEN=${ghToken}`);
+  }
+
+  // Pass MCP proxy URL so containers connect via SSE (no tokens exposed)
+  const mcpProxyPort = String(MCP_PROXY_PORT);
+  args.push(
+    '-e',
+    `MCP_PROXY_URL=http://${CONTAINER_HOST_GATEWAY}:${mcpProxyPort}/mcp`,
+  );
+
+  // Pass model overrides and SDK config so the container uses the same settings as the host
+  const passthroughEnvVars = [
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_SMALL_FAST_MODEL',
+    'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  ];
+  const passthroughFromFile = readEnvFile(passthroughEnvVars);
+  for (const key of passthroughEnvVars) {
+    const val = process.env[key] || passthroughFromFile[key];
+    if (val) args.push('-e', `${key}=${val}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // Pass GPU access to containers when NVIDIA runtime is available
+  args.push(...gpuArgs());
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -264,6 +475,53 @@ function buildContainerArgs(
   return args;
 }
 
+/**
+ * Resolve which MCP tools a coworker is allowed to use.
+ * Priority: group.allowedMcpTools (DB) > coworker-types.json > base tier defaults.
+ * mcp__nanoclaw__* is always added by the agent-runner, not here.
+ */
+function resolveAllowedMcpTools(
+  group: RegisteredGroup,
+  isMain: boolean,
+): string[] | undefined {
+  // If explicitly set on the group (custom coworker or DB override), use it
+  if (group.allowedMcpTools && group.allowedMcpTools.length > 0) {
+    return group.allowedMcpTools;
+  }
+
+  // If typed coworker, look up from coworker-types.json
+  if (group.coworkerType) {
+    try {
+      const typesPath = path.join(
+        process.cwd(),
+        'groups',
+        'coworker-types.json',
+      );
+      const types = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
+      const entry = types[group.coworkerType];
+      if (entry?.allowedMcpTools) {
+        return entry.allowedMcpTools;
+      }
+    } catch {
+      /* coworker-types.json missing or invalid */
+    }
+  }
+
+  // Main/coordinator gets DeepWiki only (nanoclaw is always added)
+  if (isMain) {
+    return ['mcp__deepwiki__ask_question'];
+  }
+
+  // Fallback: base tier (same as typed coworkers)
+  return [
+    'mcp__deepwiki__ask_question',
+    'mcp__slang-mcp__github_get_issue',
+    'mcp__slang-mcp__github_get_pull_request',
+    'mcp__slang-mcp__github_get_pull_request_comments',
+    'mcp__slang-mcp__github_get_pull_request_reviews',
+  ];
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -272,13 +530,18 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
+  // Resolve MCP tool permissions and inject into input
+  if (!input.allowedMcpTools) {
+    input.allowedMcpTools = resolveAllowedMcpTools(group, input.isMain);
+  }
+
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
 
   logger.debug(
     {

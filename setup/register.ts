@@ -116,6 +116,27 @@ export async function run(args: string[]): Promise<void> {
     recursive: true,
   });
 
+  // Seed new groups with a CLAUDE.md if they don't have one.
+  // Main groups get the admin template; non-main groups get the global template.
+  const groupClaudeMd = path.join(
+    projectRoot,
+    'groups',
+    parsed.folder,
+    'CLAUDE.md',
+  );
+  if (!fs.existsSync(groupClaudeMd)) {
+    const templatePath = parsed.isMain
+      ? path.join(projectRoot, 'groups', 'main', 'CLAUDE.md')
+      : path.join(projectRoot, 'groups', 'global', 'CLAUDE.md');
+    if (fs.existsSync(templatePath)) {
+      fs.copyFileSync(templatePath, groupClaudeMd);
+      logger.info(
+        { template: templatePath, target: groupClaudeMd },
+        'Seeded CLAUDE.md for new group',
+      );
+    }
+  }
+
   // Update assistant name in CLAUDE.md files if different from default
   let nameUpdated = false;
   if (parsed.assistantName !== 'Andy') {

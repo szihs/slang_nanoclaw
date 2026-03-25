@@ -5,7 +5,13 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  storeMessage,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -81,8 +87,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
                   await deps.sendMessage(data.chatJid, data.text);
+                  // Store IPC reply in DB so dashboard can display it
+                  storeMessage({
+                    id: `ipc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    chat_jid: data.chatJid,
+                    sender: data.sender || 'assistant',
+                    sender_name: data.sender || sourceGroup,
+                    content: data.text,
+                    timestamp: new Date().toISOString(),
+                    is_from_me: true,
+                    is_bot_message: true,
+                  });
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {
@@ -171,6 +188,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    coworkerType?: string;
+    claudeMdAppend?: string;
+    allowedMcpTools?: string[];
+    // For append_learning
+    content?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -415,7 +437,7 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'register_group':
+    case 'register_group': {
       // Only main group can register new groups
       if (!isMain) {
         logger.warn(
@@ -432,15 +454,83 @@ export async function processTaskIpc(
           );
           break;
         }
+
+        // Extract coworkerType from data or nested containerConfig
+        let containerConfig = data.containerConfig;
+        const coworkerType =
+          data.coworkerType || (containerConfig as any)?.coworkerType;
+        // Remove coworkerType from containerConfig if it was nested there
+        if (containerConfig && (containerConfig as any).coworkerType) {
+          const { coworkerType: _, ...rest } = containerConfig as any;
+          containerConfig = Object.keys(rest).length ? rest : undefined;
+        }
+
+        // Coworkers clone the Slang repo themselves inside the container
+        // (into /workspace/group/slang/) via the slang-build skill.
+        // No host worktrees or additionalMounts needed.
+
+        // Auto-resolve allowedMcpTools from coworker-types.json if not explicitly provided
+        let resolvedMcpTools = data.allowedMcpTools;
+        if (!resolvedMcpTools && coworkerType) {
+          try {
+            const typesPath = path.join(
+              process.cwd(),
+              'groups',
+              'coworker-types.json',
+            );
+            const types = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
+            if (types[coworkerType]?.allowedMcpTools) {
+              resolvedMcpTools = types[coworkerType].allowedMcpTools;
+            }
+          } catch {
+            /* coworker-types.json missing */
+          }
+        }
+
         // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),
-          containerConfig: data.containerConfig,
+          containerConfig,
           requiresTrigger: data.requiresTrigger,
+          coworkerType: coworkerType || undefined,
+          allowedMcpTools: resolvedMcpTools || undefined,
         });
+
+        // Create group folder and seed CLAUDE.md from global template.
+        // Domain template composition is handled by container-runner.ts at
+        // every startup using the stored coworkerType — keeps templates fresh.
+        const groupDir = path.join(process.cwd(), 'groups', data.folder);
+        fs.mkdirSync(groupDir, { recursive: true });
+        const claudeMd = path.join(groupDir, 'CLAUDE.md');
+        if (!fs.existsSync(claudeMd)) {
+          const globalClaudeMd = path.join(
+            process.cwd(),
+            'groups',
+            'global',
+            'CLAUDE.md',
+          );
+          if (fs.existsSync(globalClaudeMd)) {
+            fs.copyFileSync(globalClaudeMd, claudeMd);
+            logger.info(
+              { folder: data.folder },
+              'Seeded CLAUDE.md from global template',
+            );
+          }
+        }
+
+        // Group folder structure is minimal — agents create subdirs as needed
+
+        // Append custom content passed by the agent (non-template additions)
+        if (data.claudeMdAppend && fs.existsSync(claudeMd)) {
+          fs.appendFileSync(claudeMd, `\n---\n\n${data.claudeMdAppend}`);
+          logger.info(
+            { folder: data.folder },
+            'Appended custom content to CLAUDE.md',
+          );
+        }
       } else {
         logger.warn(
           { data },
@@ -448,6 +538,35 @@ export async function processTaskIpc(
         );
       }
       break;
+    }
+
+    case 'append_learning': {
+      if (!data.content) {
+        logger.warn({ sourceGroup }, 'Missing content in append_learning IPC');
+        break;
+      }
+      const learningsDir = path.join(
+        process.cwd(),
+        'groups',
+        'global',
+        'learnings',
+      );
+      fs.mkdirSync(learningsDir, { recursive: true });
+      const filename = `${sourceGroup}-${Date.now()}.md`;
+      fs.writeFileSync(path.join(learningsDir, filename), data.content);
+
+      // Maintain INDEX.md so agents can scan learnings without reading every file
+      const title =
+        data.content.match(/^#\s+(.+)$/m)?.[1] || 'Untitled learning';
+      const indexLine = `- [${title}](${filename}) — from ${sourceGroup} (${new Date().toISOString().split('T')[0]})\n`;
+      fs.appendFileSync(path.join(learningsDir, 'INDEX.md'), indexLine);
+
+      logger.info(
+        { sourceGroup, filename },
+        'Learning appended to global via IPC',
+      );
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

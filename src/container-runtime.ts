@@ -40,6 +40,34 @@ function detectProxyBindHost(): string {
   return '0.0.0.0';
 }
 
+/** Detect whether the NVIDIA container runtime is available for GPU passthrough. */
+let _gpuAvailable: boolean | null = null;
+export function hasGpuRuntime(): boolean {
+  if (_gpuAvailable !== null) return _gpuAvailable;
+  try {
+    execSync('docker info --format "{{json .Runtimes}}"', {
+      stdio: 'pipe',
+      timeout: 5000,
+    })
+      .toString()
+      .includes('nvidia');
+    // Also verify nvidia-smi works on the host
+    execSync('nvidia-smi', { stdio: 'pipe', timeout: 5000 });
+    _gpuAvailable = true;
+    logger.info('NVIDIA GPU runtime detected — containers will get GPU access');
+  } catch {
+    _gpuAvailable = false;
+    logger.debug('No NVIDIA GPU runtime available');
+  }
+  return _gpuAvailable;
+}
+
+/** CLI args to pass GPU access to containers (empty if no GPU available). */
+export function gpuArgs(): string[] {
+  if (!hasGpuRuntime()) return [];
+  return ['--gpus', 'all'];
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly

@@ -4,12 +4,14 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { startMcpProxy } from './mcp-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -73,6 +75,39 @@ let messageLoopRunning = false;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+// Cached trigger patterns for multi-trigger routing (coworker @mentions)
+let coworkerTriggers: {
+  jid: string;
+  pattern: RegExp;
+  group: RegisteredGroup;
+}[] = [];
+
+// Maps coworker JID → original source JID for echo-back (e.g. dashboard:slang-cuda → tg:12345)
+const routeEchoMap = new Map<string, string>();
+const ROUTE_ECHO_MAP_MAX = 200;
+function setRouteEcho(cwJid: string, sourceJid: string): void {
+  if (routeEchoMap.size >= ROUTE_ECHO_MAP_MAX) {
+    // Evict oldest entry (first key in insertion order)
+    const oldest = routeEchoMap.keys().next().value;
+    if (oldest) routeEchoMap.delete(oldest);
+  }
+  routeEchoMap.set(cwJid, sourceJid);
+}
+
+function rebuildCoworkerTriggers(): void {
+  coworkerTriggers = [];
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (group.isMain) continue; // don't match main against itself
+    if (!group.trigger) continue;
+    try {
+      const escaped = group.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      coworkerTriggers.push({ jid, pattern: new RegExp(escaped, 'i'), group });
+    } catch {
+      // Invalid pattern — skip
+    }
+  }
+}
+
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
   const agentTs = getRouterState('last_agent_timestamp');
@@ -84,6 +119,7 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  rebuildCoworkerTriggers();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -109,9 +145,25 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  rebuildCoworkerTriggers();
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+  // Seed new groups with a CLAUDE.md if they don't have one.
+  // Main groups get the admin template (group management, coworker orchestration).
+  // Non-main groups get the global template (base persona, shared learnings).
+  const groupClaudeMd = path.join(groupDir, 'CLAUDE.md');
+  if (!fs.existsSync(groupClaudeMd)) {
+    // Use GROUPS_DIR directly — resolveGroupFolderPath('global') throws
+    // because 'global' is a reserved folder name.
+    const templatePath = group.isMain
+      ? path.join(GROUPS_DIR, 'main', 'CLAUDE.md')
+      : path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
+    if (fs.existsSync(templatePath)) {
+      fs.copyFileSync(templatePath, groupClaudeMd);
+    }
+  }
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -142,6 +194,7 @@ export function _setRegisteredGroups(
   groups: Record<string, RegisteredGroup>,
 ): void {
   registeredGroups = groups;
+  rebuildCoworkerTriggers();
 }
 
 /**
@@ -224,7 +277,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await channel.sendMessage(chatJid, text);
+        // Echo-back: if this coworker was triggered from another channel (e.g. Telegram),
+        // forward the reply there too so the user sees it in the original chat.
+        const echoJid = routeEchoMap.get(chatJid);
+        if (echoJid) {
+          const echoChannel = findChannel(channels, echoJid);
+          if (echoChannel) {
+            const prefix = `[${group.name}] `;
+            await echoChannel
+              .sendMessage(echoJid, prefix + text)
+              .catch((err) =>
+                logger.warn(
+                  { echoJid, err },
+                  'Failed to echo-back to source channel',
+                ),
+              );
+          }
+        }
         outputSentToUser = true;
+        // Store agent reply in DB so dashboard can display it
+        storeMessage({
+          id: `reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          chat_jid: chatJid,
+          sender: 'assistant',
+          sender_name: ASSISTANT_NAME,
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+        });
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -393,6 +474,66 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const isMainGroup = group.isMain === true;
+
+          // Multi-trigger routing: when a message in the main chat contains
+          // @CoworkerName, re-route it to that coworker's group instead.
+          if (isMainGroup && coworkerTriggers.length > 0) {
+            const routedMessages: Set<string> = new Set();
+            for (const msg of groupMessages) {
+              if (msg.is_bot_message || msg.is_from_me) continue;
+              for (const {
+                jid: cwJid,
+                pattern,
+                group: cwGroup,
+              } of coworkerTriggers) {
+                if (pattern.test(msg.content)) {
+                  // Re-store message under coworker's JID
+                  storeMessage({
+                    ...msg,
+                    id: `route-${msg.id}`,
+                    chat_jid: cwJid,
+                  });
+                  // Enqueue the coworker or pipe to its active container
+                  const cwChannel = findChannel(channels, cwJid);
+                  if (cwChannel) {
+                    const cwPending = getMessagesSince(
+                      cwJid,
+                      lastAgentTimestamp[cwJid] || '',
+                      ASSISTANT_NAME,
+                    );
+                    const cwFormatted = formatMessages(
+                      cwPending.length > 0
+                        ? cwPending
+                        : [{ ...msg, chat_jid: cwJid }],
+                      TIMEZONE,
+                    );
+                    if (!queue.sendMessage(cwJid, cwFormatted)) {
+                      queue.enqueueMessageCheck(cwJid);
+                    }
+                  }
+                  routedMessages.add(msg.id);
+                  // Track source JID for echo-back (so coworker replies go back to Telegram)
+                  setRouteEcho(cwJid, chatJid);
+                  logger.info(
+                    { from: chatJid, to: cwJid, trigger: cwGroup.trigger },
+                    'Multi-trigger: routed message to coworker',
+                  );
+                  break; // first match wins
+                }
+              }
+            }
+            // If all messages were routed to coworkers, skip main processing
+            if (
+              routedMessages.size > 0 &&
+              groupMessages.every(
+                (m) =>
+                  routedMessages.has(m.id) || m.is_bot_message || m.is_from_me,
+              )
+            ) {
+              continue;
+            }
+          }
+
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
@@ -483,10 +624,14 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Start MCP proxy (containers connect via SSE URL, no tokens exposed)
+  const mcpProxy = await startMcpProxy(PROXY_BIND_HOST);
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
+    mcpProxy.stop();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
